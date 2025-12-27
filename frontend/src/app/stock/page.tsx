@@ -12,13 +12,13 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 
 /**
  * Stock List Page
  * Displays all SKUs with search, filter, and CRUD operations
  */
-export default function StockPage() {
+function StockContent() {
   const searchParams = useSearchParams();
   const filterParam = searchParams.get("filter");
 
@@ -304,5 +304,13 @@ export default function StockPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function StockPage() {
+  return (
+    <Suspense fallback={<div>Loading...</div>}>
+      <StockContent />
+    </Suspense>
   );
 }
