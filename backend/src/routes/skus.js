@@ -1,78 +1,64 @@
-// SKU Routes - CRUD operations for Stock Keeping Units
+// SKU Routes - CRUD operations
 
 const express = require("express");
 const router = express.Router();
-const db = require("../db/connection");
+const pool = require("../db/connection");
 
-// GET /api/skus - List all SKUs with optional filtering
+// GET /api/skus - List all SKUs
 router.get("/", async (req, res) => {
   try {
     const { category, search, low_stock } = req.query;
-
     let query = "SELECT * FROM skus WHERE 1=1";
     const params = [];
-    let paramIndex = 1;
 
     if (category) {
-      query += ` AND category = $${paramIndex++}`;
       params.push(category);
+      query += ` AND category = $${params.length}`;
     }
-
     if (search) {
-      query += ` AND name ILIKE $${paramIndex++}`;
       params.push(`%${search}%`);
+      query += ` AND name ILIKE $${params.length}`;
     }
-
     if (low_stock === "true") {
       query += " AND current_quantity <= reorder_level";
     }
+    query += " ORDER BY name";
 
-    query += " ORDER BY name ASC";
-
-    const skus = await db.all(query, params);
-
-    res.json({
-      success: true,
-      data: skus,
-      count: skus.length,
-    });
-  } catch (error) {
-    console.error("Error fetching SKUs:", error);
+    const result = await pool.query(query, params);
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ success: false, error: "Failed to fetch SKUs" });
   }
 });
 
-// GET /api/skus/categories - Get list of unique categories
+// GET /api/skus/categories
 router.get("/categories", async (req, res) => {
   try {
-    const categories = await db.all(
+    const result = await pool.query(
       "SELECT DISTINCT category FROM skus ORDER BY category"
     );
-    res.json({
-      success: true,
-      data: categories.map((c) => c.category),
-    });
-  } catch (error) {
-    console.error("Error fetching categories:", error);
+    res.json({ success: true, data: result.rows.map((r) => r.category) });
+  } catch (err) {
+    console.error(err);
     res
       .status(500)
       .json({ success: false, error: "Failed to fetch categories" });
   }
 });
 
-// GET /api/skus/:id - Get single SKU by ID
+// GET /api/skus/:id
 router.get("/:id", async (req, res) => {
   try {
-    const { id } = req.params;
-    const sku = await db.get("SELECT * FROM skus WHERE id = $1", [id]);
-
-    if (!sku) {
+    const result = await pool.query("SELECT * FROM skus WHERE id = $1", [
+      req.params.id,
+    ]);
+    if (result.rows.length === 0) {
       return res.status(404).json({ success: false, error: "SKU not found" });
     }
-
-    res.json({ success: true, data: sku });
-  } catch (error) {
-    console.error("Error fetching SKU:", error);
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ success: false, error: "Failed to fetch SKU" });
   }
 });
@@ -89,119 +75,100 @@ router.post("/", async (req, res) => {
     } = req.body;
 
     if (!name || !category) {
-      return res.status(400).json({
-        success: false,
-        error: "Name and category are required",
-      });
+      return res
+        .status(400)
+        .json({ success: false, error: "Name and category required" });
     }
 
-    const result = await db.run(
+    const result = await pool.query(
       `INSERT INTO skus (name, category, reorder_level, current_quantity, unit_price)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
       [name, category, reorder_level, current_quantity, unit_price]
     );
 
-    const newSku = await db.get("SELECT * FROM skus WHERE id = $1", [
-      result.id,
-    ]);
-
-    res.status(201).json({
-      success: true,
-      message: "SKU created successfully",
-      data: newSku,
-    });
-  } catch (error) {
-    console.error("Error creating SKU:", error);
+    res.status(201).json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ success: false, error: "Failed to create SKU" });
   }
 });
 
-// PUT /api/skus/:id - Update existing SKU
+// PUT /api/skus/:id - Update SKU
 router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params;
     const { name, category, reorder_level, unit_price } = req.body;
 
-    const existing = await db.get("SELECT * FROM skus WHERE id = $1", [id]);
-    if (!existing) {
-      return res.status(404).json({ success: false, error: "SKU not found" });
+    // Build dynamic update query
+    const fields = [];
+    const values = [];
+    if (name) {
+      values.push(name);
+      fields.push(`name = $${values.length}`);
     }
-
-    const updates = [];
-    const params = [];
-    let paramIndex = 1;
-
-    if (name !== undefined) {
-      updates.push(`name = $${paramIndex++}`);
-      params.push(name);
-    }
-    if (category !== undefined) {
-      updates.push(`category = $${paramIndex++}`);
-      params.push(category);
+    if (category) {
+      values.push(category);
+      fields.push(`category = $${values.length}`);
     }
     if (reorder_level !== undefined) {
-      updates.push(`reorder_level = $${paramIndex++}`);
-      params.push(reorder_level);
+      values.push(reorder_level);
+      fields.push(`reorder_level = $${values.length}`);
     }
     if (unit_price !== undefined) {
-      updates.push(`unit_price = $${paramIndex++}`);
-      params.push(unit_price);
+      values.push(unit_price);
+      fields.push(`unit_price = $${values.length}`);
     }
 
-    if (updates.length === 0) {
+    if (fields.length === 0) {
       return res
         .status(400)
         .json({ success: false, error: "No fields to update" });
     }
 
-    params.push(id);
-    await db.run(
-      `UPDATE skus SET ${updates.join(", ")} WHERE id = $${paramIndex}`,
-      params
+    values.push(id);
+    const result = await pool.query(
+      `UPDATE skus SET ${fields.join(", ")} WHERE id = $${
+        values.length
+      } RETURNING *`,
+      values
     );
 
-    const updatedSku = await db.get("SELECT * FROM skus WHERE id = $1", [id]);
-
-    res.json({
-      success: true,
-      message: "SKU updated successfully",
-      data: updatedSku,
-    });
-  } catch (error) {
-    console.error("Error updating SKU:", error);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: "SKU not found" });
+    }
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ success: false, error: "Failed to update SKU" });
   }
 });
 
-// DELETE /api/skus/:id - Delete SKU (only if no transactions exist)
+// DELETE /api/skus/:id
 router.delete("/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
-    const existing = await db.get("SELECT * FROM skus WHERE id = $1", [id]);
-    if (!existing) {
-      return res.status(404).json({ success: false, error: "SKU not found" });
-    }
-
-    const txCount = await db.get(
-      "SELECT COUNT(*) as count FROM transactions WHERE sku_id = $1",
+    // Check if SKU has transactions
+    const txCheck = await pool.query(
+      "SELECT COUNT(*) FROM transactions WHERE sku_id = $1",
       [id]
     );
-    if (parseInt(txCount.count) > 0) {
-      return res.status(400).json({
-        success: false,
-        error: "Cannot delete SKU with existing transactions",
-      });
+    if (parseInt(txCheck.rows[0].count) > 0) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Cannot delete SKU with transactions" });
     }
 
-    await db.run("DELETE FROM skus WHERE id = $1", [id]);
-
-    res.json({
-      success: true,
-      message: "SKU deleted successfully",
-    });
-  } catch (error) {
-    console.error("Error deleting SKU:", error);
+    const result = await pool.query(
+      "DELETE FROM skus WHERE id = $1 RETURNING id",
+      [id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: "SKU not found" });
+    }
+    res.json({ success: true, message: "SKU deleted" });
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ success: false, error: "Failed to delete SKU" });
   }
 });

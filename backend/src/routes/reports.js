@@ -1,148 +1,106 @@
-// Reports Routes - Analytical reports for inventory
+// Reports Routes - Inventory analysis
 
 const express = require("express");
 const router = express.Router();
-const db = require("../db/connection");
+const pool = require("../db/connection");
 
 // GET /api/reports/dead-stock - Items with no sales in 90 days
 router.get("/dead-stock", async (req, res) => {
   try {
-    const deadStock = await db.all(`
-      SELECT s.*,
-        (s.current_quantity * s.unit_price) as stock_value,
-        (
-          SELECT MAX(created_at) FROM transactions
-          WHERE sku_id = s.id AND transaction_type = 'SALE'
-        ) as last_sale_date,
-        (
-          SELECT EXTRACT(DAY FROM NOW() - MAX(created_at))::INTEGER
-          FROM transactions
-          WHERE sku_id = s.id AND transaction_type = 'SALE'
-        ) as days_since_last_sale
+    const result = await pool.query(`
+      SELECT s.*, (s.current_quantity * s.unit_price) as stock_value,
+        (SELECT MAX(created_at) FROM transactions WHERE sku_id = s.id AND transaction_type = 'SALE') as last_sale
       FROM skus s
-      WHERE s.id NOT IN (
+      WHERE s.current_quantity > 0
+      AND s.id NOT IN (
         SELECT DISTINCT sku_id FROM transactions
-        WHERE transaction_type = 'SALE'
-        AND created_at >= NOW() - INTERVAL '90 days'
+        WHERE transaction_type = 'SALE' AND created_at >= NOW() - INTERVAL '90 days'
       )
-      AND s.current_quantity > 0
-      ORDER BY days_since_last_sale DESC NULLS FIRST
+      ORDER BY stock_value DESC
     `);
 
-    const totalValue = deadStock.reduce(
-      (sum, item) => sum + (parseFloat(item.stock_value) || 0),
+    const totalValue = result.rows.reduce(
+      (sum, r) => sum + parseFloat(r.stock_value || 0),
       0
     );
-
     res.json({
       success: true,
-      data: deadStock,
+      data: result.rows,
       summary: {
-        count: deadStock.length,
+        count: result.rows.length,
         totalValue: Math.round(totalValue),
       },
     });
-  } catch (error) {
-    console.error("Error fetching dead stock:", error);
+  } catch (err) {
+    console.error(err);
     res
       .status(500)
-      .json({ success: false, error: "Failed to fetch dead stock report" });
+      .json({ success: false, error: "Failed to fetch dead stock" });
   }
 });
 
 // GET /api/reports/reorder - Items below reorder level
 router.get("/reorder", async (req, res) => {
   try {
-    const reorderItems = await db.all(`
-      SELECT s.*,
-        (s.reorder_level - s.current_quantity) as shortage,
-        (s.reorder_level * 2) as suggested_order_qty
-      FROM skus s
-      WHERE s.current_quantity <= s.reorder_level
-      ORDER BY
-        CASE WHEN s.current_quantity = 0 THEN 0 ELSE 1 END,
-        shortage DESC
+    const result = await pool.query(`
+      SELECT *, (reorder_level - current_quantity) as shortage
+      FROM skus WHERE current_quantity <= reorder_level
+      ORDER BY current_quantity ASC, shortage DESC
     `);
 
     res.json({
       success: true,
-      data: reorderItems,
+      data: result.rows,
       summary: {
-        count: reorderItems.length,
-        outOfStock: reorderItems.filter((i) => i.current_quantity === 0).length,
+        count: result.rows.length,
+        outOfStock: result.rows.filter((r) => r.current_quantity === 0).length,
       },
     });
-  } catch (error) {
-    console.error("Error fetching reorder report:", error);
+  } catch (err) {
+    console.error(err);
     res
       .status(500)
-      .json({ success: false, error: "Failed to fetch reorder report" });
+      .json({ success: false, error: "Failed to fetch reorder list" });
   }
 });
 
-// GET /api/reports/top-selling - Most sold items
+// GET /api/reports/top-selling
 router.get("/top-selling", async (req, res) => {
   try {
-    const { days = 30 } = req.query;
+    const days = parseInt(req.query.days) || 30;
+    const result = await pool.query(`
+      SELECT s.id, s.name, s.category, SUM(t.quantity) as total_sold
+      FROM skus s JOIN transactions t ON s.id = t.sku_id
+      WHERE t.transaction_type = 'SALE' AND t.created_at >= NOW() - INTERVAL '${days} days'
+      GROUP BY s.id ORDER BY total_sold DESC LIMIT 10
+    `);
 
-    const topSelling = await db.all(
-      `SELECT s.id, s.name, s.category, s.current_quantity, s.unit_price,
-        COUNT(t.id) as sale_count,
-        SUM(t.quantity) as total_sold,
-        SUM(t.quantity * s.unit_price) as revenue
-      FROM skus s
-      JOIN transactions t ON s.id = t.sku_id
-      WHERE t.transaction_type = 'SALE'
-        AND t.created_at >= NOW() - ($1 || ' days')::INTERVAL
-      GROUP BY s.id, s.name, s.category, s.current_quantity, s.unit_price
-      ORDER BY total_sold DESC
-      LIMIT 10`,
-      [days]
-    );
-
-    res.json({
-      success: true,
-      data: topSelling,
-      period: `Last ${days} days`,
-    });
-  } catch (error) {
-    console.error("Error fetching top selling:", error);
+    res.json({ success: true, data: result.rows, period: `Last ${days} days` });
+  } catch (err) {
+    console.error(err);
     res
       .status(500)
-      .json({ success: false, error: "Failed to fetch top selling report" });
+      .json({ success: false, error: "Failed to fetch top selling" });
   }
 });
 
-// GET /api/reports/slow-moving - Least sold items
+// GET /api/reports/slow-moving
 router.get("/slow-moving", async (req, res) => {
   try {
-    const { days = 30 } = req.query;
+    const days = parseInt(req.query.days) || 30;
+    const result = await pool.query(`
+      SELECT s.*, (s.current_quantity * s.unit_price) as stock_value,
+        COALESCE((SELECT SUM(quantity) FROM transactions WHERE sku_id = s.id AND created_at >= NOW() - INTERVAL '${days} days'), 0) as movement
+      FROM skus s WHERE s.current_quantity > 0
+      ORDER BY movement ASC, stock_value DESC LIMIT 10
+    `);
 
-    const slowMoving = await db.all(
-      `SELECT s.id, s.name, s.category, s.current_quantity, s.unit_price,
-        (s.current_quantity * s.unit_price) as stock_value,
-        COALESCE((
-          SELECT SUM(quantity) FROM transactions
-          WHERE sku_id = s.id
-            AND created_at >= NOW() - ($1 || ' days')::INTERVAL
-        ), 0) as total_movement
-      FROM skus s
-      WHERE s.current_quantity > 0
-      ORDER BY total_movement ASC, stock_value DESC
-      LIMIT 10`,
-      [days]
-    );
-
-    res.json({
-      success: true,
-      data: slowMoving,
-      period: `Last ${days} days`,
-    });
-  } catch (error) {
-    console.error("Error fetching slow moving:", error);
+    res.json({ success: true, data: result.rows, period: `Last ${days} days` });
+  } catch (err) {
+    console.error(err);
     res
       .status(500)
-      .json({ success: false, error: "Failed to fetch slow moving report" });
+      .json({ success: false, error: "Failed to fetch slow moving" });
   }
 });
 
