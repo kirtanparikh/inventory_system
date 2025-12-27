@@ -1,71 +1,66 @@
-// Dashboard Routes - Stats overview
+const router = require("express").Router();
+const db = require("../db/connection");
 
-const express = require("express");
-const router = express.Router();
-const pool = require("../db/connection");
-
-// GET /api/dashboard/stats
+// Get dashboard stats
 router.get("/stats", async (req, res) => {
-  try {
-    // Basic counts
-    const totalSkus = (await pool.query("SELECT COUNT(*) FROM skus")).rows[0]
-      .count;
-    const stockValue = (
-      await pool.query(
-        "SELECT COALESCE(SUM(current_quantity * unit_price), 0) as total FROM skus"
-      )
-    ).rows[0].total;
-    const reorderCount = (
-      await pool.query(
-        "SELECT COUNT(*) FROM skus WHERE current_quantity <= reorder_level"
-      )
-    ).rows[0].count;
-    const outOfStock = (
-      await pool.query("SELECT COUNT(*) FROM skus WHERE current_quantity = 0")
-    ).rows[0].count;
+  // Total SKUs and stock value
+  const totals = (
+    await db.query(`
+    SELECT COUNT(*) as total_skus, COALESCE(SUM(current_quantity * unit_price), 0) as stock_value
+    FROM skus
+  `)
+  ).rows[0];
 
-    // Dead stock (no sales in 90 days)
-    const deadStock = await pool.query(`
-      SELECT COUNT(*) as count, COALESCE(SUM(current_quantity * unit_price), 0) as value
-      FROM skus WHERE current_quantity > 0
-      AND id NOT IN (
-        SELECT DISTINCT sku_id FROM transactions
-        WHERE transaction_type = 'SALE' AND created_at >= NOW() - INTERVAL '90 days'
-      )
-    `);
+  // Low stock count
+  const lowStock = (
+    await db.query(`
+    SELECT COUNT(*) as count FROM skus WHERE current_quantity <= reorder_level
+  `)
+  ).rows[0].count;
 
-    // Recent transactions
-    const recent = await pool.query(`
-      SELECT t.*, s.name as sku_name, s.category as sku_category
-      FROM transactions t JOIN skus s ON t.sku_id = s.id
-      ORDER BY t.created_at DESC LIMIT 10
-    `);
+  // Dead stock (no sales in 90 days)
+  const deadStock = (
+    await db.query(`
+    SELECT COUNT(*) as count, COALESCE(SUM(current_quantity * unit_price), 0) as value
+    FROM skus WHERE current_quantity > 0 AND id NOT IN (
+      SELECT DISTINCT sku_id FROM transactions
+      WHERE transaction_type = 'SALE' AND created_at >= NOW() - INTERVAL '90 days'
+    )
+  `)
+  ).rows[0];
 
-    // Category breakdown
-    const categories = await pool.query(`
-      SELECT category, COUNT(*) as count, SUM(current_quantity * unit_price) as value
-      FROM skus GROUP BY category ORDER BY value DESC
-    `);
+  // Recent transactions
+  const recent = (
+    await db.query(`
+    SELECT t.*, s.name as sku_name FROM transactions t
+    JOIN skus s ON t.sku_id = s.id ORDER BY t.created_at DESC LIMIT 5
+  `)
+  ).rows;
 
-    res.json({
-      success: true,
-      data: {
-        overview: {
-          totalSkus: parseInt(totalSkus),
-          stockValue: Math.round(parseFloat(stockValue)),
-          reorderCount: parseInt(reorderCount),
-          outOfStock: parseInt(outOfStock),
-          deadStockCount: parseInt(deadStock.rows[0].count),
-          deadStockValue: Math.round(parseFloat(deadStock.rows[0].value)),
-        },
-        recentTransactions: recent.rows,
-        categoryStats: categories.rows,
+  // Category stats
+  const categories = (
+    await db.query(`
+    SELECT category, COUNT(*) as sku_count, SUM(current_quantity) as total_quantity,
+           SUM(current_quantity * unit_price) as total_value
+    FROM skus GROUP BY category ORDER BY total_value DESC
+  `)
+  ).rows;
+
+  res.json({
+    data: {
+      overview: {
+        totalSkus: parseInt(totals.total_skus),
+        stockValue: Math.round(parseFloat(totals.stock_value)),
+        reorderCount: parseInt(lowStock),
+        outOfStock: 0,
+        deadStockCount: parseInt(deadStock.count),
+        deadStockValue: Math.round(parseFloat(deadStock.value)),
       },
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, error: "Failed to fetch stats" });
-  }
+      recentTransactions: recent,
+      todayStats: [],
+      categoryStats: categories,
+    },
+  });
 });
 
 module.exports = router;
