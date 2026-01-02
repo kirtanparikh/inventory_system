@@ -1,6 +1,6 @@
 # Inventory Management System
 
-Simple inventory tracker for small material businesses. Built for Insyd SDE Intern Assignment.
+Simple inventory tracker for small material businesses.
 
 ## Tech Stack
 
@@ -58,4 +58,4 @@ npm run dev       # http://localhost:3000
 
 ## Author
 
-Kirtan - Insyd Assignment
+Kirtan 
